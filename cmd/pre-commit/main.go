@@ -70,9 +70,10 @@ func selectTools() ([]tool, error) {
 		case ".css", ".html", ".json", ".md", ".yaml":
 			prettier = true
 		case ".go":
-			gofiles = append(gofiles, filepath.Join(p, d.Name()))
+			gofiles = append(gofiles, p)
 		case ".cue":
-			cuefiles = append(cuefiles, filepath.Join(p, d.Name()))
+			fmt.Println(p, d.Name())
+			cuefiles = append(cuefiles, p)
 		case ".tf":
 			terraform = true
 		}
