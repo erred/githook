@@ -7,5 +7,4 @@ steps:
       - -c
       - |
         go test -vet=all ./... && \
-        staticcheck ./... && \
         go build ./...
