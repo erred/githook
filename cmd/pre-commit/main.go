@@ -58,7 +58,7 @@ type tool struct {
 
 func selectTools() ([]tool, error) {
 	var cuefiles, gofiles []string
-	var prettier, terraform bool
+	var prettier, terraform, misspell bool
 	err := filepath.WalkDir(".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			if d.Name() == ".git" {
@@ -69,8 +69,10 @@ func selectTools() ([]tool, error) {
 		switch filepath.Ext(d.Name()) {
 		case ".css", ".html", ".json", ".md", ".yaml":
 			prettier = true
+			misspell = true
 		case ".go":
 			gofiles = append(gofiles, p)
+			misspell = true
 		case ".cue":
 			fmt.Println(p, d.Name())
 			cuefiles = append(cuefiles, p)
@@ -84,6 +86,16 @@ func selectTools() ([]tool, error) {
 	}
 
 	var tools []tool
+	if misspell {
+		tools = append(tools, tool{
+			name: "misspell",
+			run: func(ctx context.Context) ([]byte, error) {
+				return exec.CommandContext(ctx,
+					"misspell", "-w", "-q", ".",
+				).CombinedOutput()
+			},
+		})
+	}
 	if prettier {
 		tools = append(tools, tool{
 			name: "prettier",
