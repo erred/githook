@@ -69,10 +69,10 @@ func main() {
 	payload := Payload{
 		Commit:  newRev,
 		Branch:  mustExecGit(`rev-parse`, `--abbrev-ref`, refName),
-		Message: mustExecGit(`log`, `-1`, `HEAD`, `--format=%B`),
+		Message: mustExecGit(`log`, `-1`, `HEAD`, `--format=%B`, `--`),
 		Author: Author{
-			Name:  mustExecGit(`log`, `-1`, `HEAD`, `--format=%an`),
-			Email: mustExecGit(`log`, `-1`, `HEAD`, `--format=%ae`),
+			Name:  mustExecGit(`log`, `-1`, `HEAD`, `--format=%an`, `--`),
+			Email: mustExecGit(`log`, `-1`, `HEAD`, `--format=%ae`, `--`),
 		},
 	}
 	b, err := json.Marshal(payload)
