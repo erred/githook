@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -31,6 +34,15 @@ type Response struct {
 }
 
 func main() {
+	ctx := context.Background()
+	lg := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{}))
+	err := run(ctx, lg)
+	if err != nil {
+		lg.LogAttrs(ctx, slog.LevelError, "failed", slog.String("error", err.Error()))
+	}
+}
+
+func run(ctx context.Context, lg *slog.Logger) error {
 	n, _ := strconv.ParseInt(os.Getenv("GIT_PUSH_OPTION_COUNT"), 10, 64)
 	pushOptions := make(map[string]string)
 	for i := 0; i < int(n); i++ {
@@ -39,23 +51,24 @@ func main() {
 	}
 
 	if _, ok := pushOptions["ci.skip"]; ok {
-		fmt.Println("skipping ci: got ci.skip push option")
-		os.Exit(0)
+		lg.LogAttrs(ctx, slog.LevelInfo, "skipping ci", slog.String("push.option", "ci.skip"))
+		return nil
 	}
 
 	org := os.Getenv("BUILDKITE_ORG_SLUG")
 	if org == "" {
-		log.Fatalln("no BUILDKITE_ORG_SLUG found")
+		return errors.New("no BUILDKITE_ORG_SLUG found")
 	}
 
 	token := os.Getenv("BUILDKITE_API_TOKEN")
 	if token == "" {
-		log.Fatalln("no BUILDKITE_API_TOKEN found")
+		return errors.New("no BUILDKITE_API_TOKEN found")
 	}
 
 	dir, err := os.Getwd()
 	if err != nil {
-		log.Fatalln("get working directory:", err)
+		lg.LogAttrs(ctx, slog.LevelError, "failed to get working directory", slog.String("error", err.Error()))
+		return err
 	}
 	repoName := strings.TrimSuffix(filepath.Base(dir), ".git")
 	repoName = strings.ReplaceAll(repoName, ".", "-dot-")
@@ -63,7 +76,8 @@ func main() {
 	var oldRev, newRev, refName string
 	_, err = fmt.Scanln(&oldRev, &newRev, &refName)
 	if err != nil {
-		log.Fatalln("read post-receive input:", err)
+		lg.LogAttrs(ctx, slog.LevelError, "failed to scan post-receive input", slog.String("error", err.Error()))
+		return err
 	}
 
 	payload := Payload{
@@ -77,7 +91,8 @@ func main() {
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
-		log.Fatalln("marshal payload:", err)
+		lg.LogAttrs(ctx, slog.LevelError, "failed to marshal payload", slog.String("error", err.Error()))
+		return err
 	}
 	u := url.URL{
 		Scheme: "https",
@@ -86,13 +101,15 @@ func main() {
 	}
 	req, err := http.NewRequest(http.MethodPost, u.String(), bytes.NewReader(b))
 	if err != nil {
-		log.Fatalln("create request", err)
+		lg.LogAttrs(ctx, slog.LevelError, "failed to create request", slog.String("error", err.Error()))
+		return err
 	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("authorization", "Bearer "+token)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Fatalln("send request to buildkite", org, repoName, err)
+		lg.LogAttrs(ctx, slog.LevelError, "failed to send request to buildkite", slog.String("org", org), slog.String("repo_name", repoName), slog.String("error", err.Error()))
+		return err
 	}
 	if res.StatusCode < 200 || res.StatusCode > 299 {
 		io.Copy(os.Stdout, res.Body)
@@ -104,10 +121,14 @@ func main() {
 	var response Response
 	err = json.NewDecoder(res.Body).Decode(&response)
 	if err != nil {
-		log.Fatalln("read response", err)
+		lg.LogAttrs(ctx, slog.LevelError, "failed to read response", slog.String("error", err.Error()))
+		return err
 	}
-	fmt.Println("build", response.State)
-	fmt.Println(response.WebURL)
+	lg.LogAttrs(ctx, slog.LevelDebug, "got response", slog.String("state", response.State), slog.String("web_url", response.WebURL))
+	fmt.Println()
+	fmt.Printf("\t%s: %s\n", response.State, response.WebURL)
+	fmt.Println()
+	return nil
 }
 
 func mustExecGit(args ...string) string {
