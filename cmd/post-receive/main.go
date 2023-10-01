@@ -18,7 +18,21 @@ import (
 	"strings"
 )
 
-type Payload struct {
+type TektonPayload struct {
+	Repo    string `json:"repo"`
+	Branch  string `json:"branch"`
+	Commit  string `json:"commit"`
+	Message string `json:"message"`
+	Author  string `json:"author"`
+	Email   string `json:"email"`
+}
+
+type TektonResponse struct {
+	EventListenerUID string `json:"eventListenerUID"`
+	EventID          string `json:"eventID"`
+}
+
+type BuildkitePayload struct {
 	Commit  string `json:"commit"`
 	Branch  string `json:"branch"`
 	Message string `json:"message"`
@@ -55,23 +69,12 @@ func run(ctx context.Context, lg *slog.Logger) error {
 		return nil
 	}
 
-	org := os.Getenv("BUILDKITE_ORG_SLUG")
-	if org == "" {
-		return errors.New("no BUILDKITE_ORG_SLUG found")
-	}
-
-	token := os.Getenv("BUILDKITE_API_TOKEN")
-	if token == "" {
-		return errors.New("no BUILDKITE_API_TOKEN found")
-	}
-
 	dir, err := os.Getwd()
 	if err != nil {
 		lg.LogAttrs(ctx, slog.LevelError, "failed to get working directory", slog.String("error", err.Error()))
 		return err
 	}
 	repoName := strings.TrimSuffix(filepath.Base(dir), ".git")
-	repoName = strings.ReplaceAll(repoName, ".", "-dot-")
 
 	var oldRev, newRev, refName string
 	_, err = fmt.Scanln(&oldRev, &newRev, &refName)
@@ -80,53 +83,135 @@ func run(ctx context.Context, lg *slog.Logger) error {
 		return err
 	}
 
-	payload := Payload{
-		Commit:  newRev,
-		Branch:  mustExecGit(`rev-parse`, `--abbrev-ref`, refName),
-		Message: mustExecGit(`log`, `-1`, `HEAD`, `--format=%B`, `--`),
-		Author: Author{
-			Name:  mustExecGit(`log`, `-1`, `HEAD`, `--format=%an`, `--`),
-			Email: mustExecGit(`log`, `-1`, `HEAD`, `--format=%ae`, `--`),
-		},
-	}
-	b, err := json.Marshal(payload)
+	commit := newRev
+	branch := mustExecGit(`rev-parse`, `--abbrev-ref`, refName)
+	message := mustExecGit(`log`, `-1`, `HEAD`, `--format=%B`, `--`)
+	author := mustExecGit(`log`, `-1`, `HEAD`, `--format=%an`, `--`)
+	email := mustExecGit(`log`, `-1`, `HEAD`, `--format=%ae`, `--`)
+
+	// buildkite
+	buildkiteResponse, err := func() (string, error) {
+		org := os.Getenv("BUILDKITE_ORG_SLUG")
+		if org == "" {
+			return "", errors.New("no BUILDKITE_ORG_SLUG found")
+		}
+
+		token := os.Getenv("BUILDKITE_API_TOKEN")
+		if token == "" {
+			return "", errors.New("no BUILDKITE_API_TOKEN found")
+		}
+
+		repoName := strings.ReplaceAll(repoName, ".", "-dot-")
+
+		payload := BuildkitePayload{
+			Commit:  commit,
+			Branch:  branch,
+			Message: message,
+			Author: Author{
+				Name:  author,
+				Email: email,
+			},
+		}
+
+		b, err := json.Marshal(payload)
+		if err != nil {
+			lg.LogAttrs(ctx, slog.LevelError, "failed to marshal payload", slog.String("error", err.Error()))
+			return "", err
+		}
+		u := url.URL{
+			Scheme: "https",
+			Host:   "api.buildkite.com",
+			Path:   fmt.Sprintf("/v2/organizations/%s/pipelines/%s/builds", org, repoName),
+		}
+		req, err := http.NewRequest(http.MethodPost, u.String(), bytes.NewReader(b))
+		if err != nil {
+			lg.LogAttrs(ctx, slog.LevelError, "failed to create request", slog.String("error", err.Error()))
+			return "", err
+		}
+		req.Header.Set("content-type", "application/json")
+		req.Header.Set("authorization", "Bearer "+token)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			lg.LogAttrs(ctx, slog.LevelError, "failed to send request to buildkite", slog.String("org", org), slog.String("repo_name", repoName), slog.String("error", err.Error()))
+			return "", err
+		}
+		if res.StatusCode < 200 || res.StatusCode > 299 {
+			io.Copy(os.Stdout, res.Body)
+			fmt.Println()
+			log.Println("url", u.String())
+			log.Println("body", string(b))
+			log.Fatalln("unexpected response from buildkite", res.Status)
+		}
+		var response Response
+		err = json.NewDecoder(res.Body).Decode(&response)
+		if err != nil {
+			lg.LogAttrs(ctx, slog.LevelError, "failed to read response", slog.String("error", err.Error()))
+			return "", err
+		}
+		lg.LogAttrs(ctx, slog.LevelDebug, "got response", slog.String("state", response.State), slog.String("web_url", response.WebURL))
+
+		return response.State + ": " + response.WebURL, nil
+	}()
 	if err != nil {
-		lg.LogAttrs(ctx, slog.LevelError, "failed to marshal payload", slog.String("error", err.Error()))
-		return err
+		lg.LogAttrs(ctx, slog.LevelError, "send to buildkite", slog.String("error", err.Error()))
+		buildkiteResponse = err.Error()
 	}
-	u := url.URL{
-		Scheme: "https",
-		Host:   "api.buildkite.com",
-		Path:   fmt.Sprintf("/v2/organizations/%s/pipelines/%s/builds", org, repoName),
-	}
-	req, err := http.NewRequest(http.MethodPost, u.String(), bytes.NewReader(b))
+
+	// tekton
+	tektonResponse, err := func() (string, error) {
+		endpoint := os.Getenv("TEKTON_TRIGGERS_ENDPOINT")
+		if endpoint == "" {
+			return "", fmt.Errorf("no TEKTON_TRIGGERS_ENDPOINT provided")
+		}
+
+		payload := TektonPayload{
+			Repo:    repoName,
+			Branch:  branch,
+			Commit:  commit,
+			Message: message,
+			Author:  author,
+			Email:   email,
+		}
+
+		b, err := json.Marshal(payload)
+		if err != nil {
+			lg.LogAttrs(ctx, slog.LevelError, "failed to marshal payload", slog.String("error", err.Error()))
+			return "", err
+		}
+		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(b))
+		if err != nil {
+			lg.LogAttrs(ctx, slog.LevelError, "failed to create request", slog.String("error", err.Error()))
+			return "", err
+		}
+		req.Header.Set("content-type", "application/json")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			lg.LogAttrs(ctx, slog.LevelError, "failed to send request to tekton", slog.String("error", err.Error()))
+			return "", err
+		}
+		if res.StatusCode < 200 || res.StatusCode > 299 {
+			io.Copy(os.Stdout, res.Body)
+			fmt.Println()
+			log.Println("body", string(b))
+			log.Fatalln("unexpected response from tekton", res.Status)
+		}
+		var response TektonResponse
+		err = json.NewDecoder(res.Body).Decode(&response)
+		if err != nil {
+			lg.LogAttrs(ctx, slog.LevelError, "failed to read response", slog.String("error", err.Error()))
+			return "", err
+		}
+		lg.LogAttrs(ctx, slog.LevelDebug, "got response", slog.String("eventlistener_uid", response.EventListenerUID), slog.String("event_id", response.EventID))
+
+		return "event id" + response.EventID, nil
+	}()
 	if err != nil {
-		lg.LogAttrs(ctx, slog.LevelError, "failed to create request", slog.String("error", err.Error()))
-		return err
+		lg.LogAttrs(ctx, slog.LevelError, "send to tekton", slog.String("error", err.Error()))
 	}
-	req.Header.Set("content-type", "application/json")
-	req.Header.Set("authorization", "Bearer "+token)
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		lg.LogAttrs(ctx, slog.LevelError, "failed to send request to buildkite", slog.String("org", org), slog.String("repo_name", repoName), slog.String("error", err.Error()))
-		return err
-	}
-	if res.StatusCode < 200 || res.StatusCode > 299 {
-		io.Copy(os.Stdout, res.Body)
-		fmt.Println()
-		log.Println("url", u.String())
-		log.Println("body", string(b))
-		log.Fatalln("unexpected response from buildkite", res.Status)
-	}
-	var response Response
-	err = json.NewDecoder(res.Body).Decode(&response)
-	if err != nil {
-		lg.LogAttrs(ctx, slog.LevelError, "failed to read response", slog.String("error", err.Error()))
-		return err
-	}
-	lg.LogAttrs(ctx, slog.LevelDebug, "got response", slog.String("state", response.State), slog.String("web_url", response.WebURL))
+
 	fmt.Println()
-	fmt.Printf("\t%s: %s\n", response.State, response.WebURL)
+	fmt.Printf("\tbuildkite:\t%s\n", buildkiteResponse)
+	fmt.Printf("\ttekton:\t%s\n", tektonResponse)
 	fmt.Println()
 	return nil
 }
