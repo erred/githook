@@ -150,7 +150,7 @@ func run(ctx context.Context, lg *slog.Logger) error {
 		}
 		lg.LogAttrs(ctx, slog.LevelDebug, "got response", slog.String("state", response.State), slog.String("web_url", response.WebURL))
 
-		return response.State + ": " + response.WebURL, nil
+		return response.State + ":\t" + response.WebURL, nil
 	}()
 	if err != nil {
 		lg.LogAttrs(ctx, slog.LevelError, "send to buildkite", slog.String("error", err.Error()))
@@ -203,15 +203,15 @@ func run(ctx context.Context, lg *slog.Logger) error {
 		}
 		lg.LogAttrs(ctx, slog.LevelDebug, "got response", slog.String("eventlistener_uid", response.EventListenerUID), slog.String("event_id", response.EventID))
 
-		return "event id" + response.EventID, nil
+		return "event-id:\t" + response.EventID, nil
 	}()
 	if err != nil {
 		lg.LogAttrs(ctx, slog.LevelError, "send to tekton", slog.String("error", err.Error()))
 	}
 
 	fmt.Println()
-	fmt.Printf("\tbuildkite:\t%s\n", buildkiteResponse)
-	fmt.Printf("\ttekton:\t%s\n", tektonResponse)
+	fmt.Printf("\tbuildkite: %s\n", buildkiteResponse)
+	fmt.Printf("\ttekton: %s\n", tektonResponse)
 	fmt.Println()
 	return nil
 }
