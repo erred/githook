@@ -240,9 +240,9 @@ func mustExecGit(args ...string) string {
 }
 
 func readCIConfig(rev string) (CIConfig, error) {
-	b, err := exec.Command("git", "cat-file", rev+":"+"ci.cue").CombinedOutput()
+	b, err := exec.Command("git", "show", rev+":"+"ci.cue").CombinedOutput()
 	if err != nil {
-		return CIConfig{}, fmt.Errorf("git cat-file %s:ci.cue: %w", rev, err)
+		return CIConfig{}, fmt.Errorf("git show %s:ci.cue: %w", rev, err)
 	}
 	var ciConfig CIConfig
 	err = cuecontext.New().CompileBytes(b).Decode(&ciConfig)
