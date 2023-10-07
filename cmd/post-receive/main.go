@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"log/slog"
 	"net/http"
@@ -16,15 +17,24 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"cuelang.org/go/cue/cuecontext"
 )
 
+type CIConfig struct {
+	Tekton struct {
+		Pipeline string `json:"pipeline"`
+	} `json:"tekton"`
+}
+
 type TektonPayload struct {
-	Repo    string `json:"repo"`
-	Branch  string `json:"branch"`
-	Commit  string `json:"commit"`
-	Message string `json:"message"`
-	Author  string `json:"author"`
-	Email   string `json:"email"`
+	Repo           string `json:"repo"`
+	Branch         string `json:"branch"`
+	Commit         string `json:"commit"`
+	Message        string `json:"message"`
+	Author         string `json:"author"`
+	Email          string `json:"email"`
+	TektonPipeline string `json:"tektonPipeline,omitempty"`
 }
 
 type TektonResponse struct {
@@ -88,6 +98,19 @@ func run(ctx context.Context, lg *slog.Logger) error {
 	message := mustExecGit(`log`, `-1`, `HEAD`, `--format=%B`, `--`)
 	author := mustExecGit(`log`, `-1`, `HEAD`, `--format=%an`, `--`)
 	email := mustExecGit(`log`, `-1`, `HEAD`, `--format=%ae`, `--`)
+
+	var tektonPipeline string
+	b, err := os.ReadFile("ci.cue")
+	if err == nil {
+		var ciConfig CIConfig
+		err := cuecontext.New().CompileBytes(b).Decode(&ciConfig)
+		if err != nil {
+			lg.LogAttrs(ctx, slog.LevelError, "failed to parse ci.cue", slog.String("error", err.Error()))
+		}
+		tektonPipeline = ciConfig.Tekton.Pipeline
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		lg.LogAttrs(ctx, slog.LevelError, "error reading ci.cue", slog.String("error", err.Error()))
+	}
 
 	// buildkite
 	buildkiteResponse, err := func() (string, error) {
@@ -165,12 +188,13 @@ func run(ctx context.Context, lg *slog.Logger) error {
 		}
 
 		payload := TektonPayload{
-			Repo:    repoName,
-			Branch:  branch,
-			Commit:  commit,
-			Message: message,
-			Author:  author,
-			Email:   email,
+			Repo:           repoName,
+			Branch:         branch,
+			Commit:         commit,
+			Message:        message,
+			Author:         author,
+			Email:          email,
+			TektonPipeline: tektonPipeline,
 		}
 
 		b, err := json.Marshal(payload)
