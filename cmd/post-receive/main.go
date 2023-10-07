@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"log/slog"
 	"net/http"
@@ -98,18 +97,9 @@ func run(ctx context.Context, lg *slog.Logger) error {
 	message := mustExecGit(`log`, `-1`, `HEAD`, `--format=%B`, `--`)
 	author := mustExecGit(`log`, `-1`, `HEAD`, `--format=%an`, `--`)
 	email := mustExecGit(`log`, `-1`, `HEAD`, `--format=%ae`, `--`)
-
-	var tektonPipeline string
-	b, err := os.ReadFile("ci.cue")
-	if err == nil {
-		var ciConfig CIConfig
-		err := cuecontext.New().CompileBytes(b).Decode(&ciConfig)
-		if err != nil {
-			lg.LogAttrs(ctx, slog.LevelError, "failed to parse ci.cue", slog.String("error", err.Error()))
-		}
-		tektonPipeline = ciConfig.Tekton.Pipeline
-	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		lg.LogAttrs(ctx, slog.LevelError, "error reading ci.cue", slog.String("error", err.Error()))
+	ciConfig, err := readCIConfig(newRev)
+	if err != nil {
+		lg.LogAttrs(ctx, slog.LevelWarn, "failed to get ci.cue", slog.String("error", err.Error()))
 	}
 
 	// buildkite
@@ -194,7 +184,7 @@ func run(ctx context.Context, lg *slog.Logger) error {
 			Message:        message,
 			Author:         author,
 			Email:          email,
-			TektonPipeline: tektonPipeline,
+			TektonPipeline: ciConfig.Tekton.Pipeline,
 		}
 
 		b, err := json.Marshal(payload)
@@ -247,4 +237,17 @@ func mustExecGit(args ...string) string {
 		log.Fatalln("run git", args, err)
 	}
 	return strings.TrimSpace(string(b))
+}
+
+func readCIConfig(rev string) (CIConfig, error) {
+	b, err := exec.Command("git", "cat-file", rev+":"+"ci.cue").CombinedOutput()
+	if err != nil {
+		return CIConfig{}, fmt.Errorf("git cat-file %s:ci.cue: %w", rev, err)
+	}
+	var ciConfig CIConfig
+	err = cuecontext.New().CompileBytes(b).Decode(&ciConfig)
+	if err != nil {
+		return CIConfig{}, fmt.Errorf("cue decode ci.cue: %w", err)
+	}
+	return ciConfig, nil
 }
